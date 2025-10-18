@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+
+# Downloaded content
+downloads/
+*.mp4
+*.webm
+*.mkv
+*.m4a
+*.mp3
+
+# Generated files
+.download_archive.txt
+*.log
+stdout.log
+stderr.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Config (if you want to keep your config private)
+# config.json

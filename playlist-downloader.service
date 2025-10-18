@@ -1,0 +1,29 @@
+# Example systemd service file for Linux
+# Copy this to /etc/systemd/system/playlist-downloader.service
+# and modify the paths and username as needed
+
+[Unit]
+Description=YouTube Playlist Auto-Downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/path/to/aududownloader
+ExecStart=/usr/bin/python3 /path/to/aududownloader/scheduler.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/path/to/aududownloader/service.log
+StandardError=append:/path/to/aududownloader/service_error.log
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/path/to/aududownloader
+
+[Install]
+WantedBy=multi-user.target

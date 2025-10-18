@@ -1,0 +1,8 @@
+# YouTube Playlist Auto-Downloader Dependencies
+# Core dependencies for the playlist monitoring and download system
+
+# Schedule management for periodic tasks
+schedule==1.2.0
+
+# Python wrapper for yt-dlp (optional, but useful for advanced features)
+# We'll use subprocess to call yt-dlp directly for better control
