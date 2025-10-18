@@ -116,6 +116,8 @@ class PlaylistDownloader:
         # Add subtitle options
         if options.get('write_subs'):
             cmd.append('--write-subs')
+        if options.get('write_auto_subs'):
+            cmd.append('--write-auto-subs')
         if 'sub_lang' in options:
             cmd.extend(['--sub-lang', options['sub_lang']])
         if options.get('embed_subs'):
@@ -130,6 +132,10 @@ class PlaylistDownloader:
         # Add merge format
         if 'merge_output_format' in options:
             cmd.extend(['--merge-output-format', options['merge_output_format']])
+
+        # Add skip download option (for subtitle-only downloads)
+        if options.get('skip_download'):
+            cmd.append('--skip-download')
 
         # Add playlist URL
         cmd.append(playlist_url)

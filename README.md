@@ -12,6 +12,7 @@ Automatically download videos from a YouTube playlist using `yt-dlp`. The system
 - **Graceful Shutdown**: Properly handles Ctrl+C and system signals
 - **Error Recovery**: Continues running even if individual downloads fail
 - **Metadata Saving**: Optionally save thumbnails, descriptions, and video info
+- **Subtitle Support**: Download both manual and auto-generated subtitles
 
 ## Prerequisites
 
@@ -62,6 +63,7 @@ Edit `config.json` to customize the behavior:
     "write_description": true,
     "write_info_json": true,
     "write_subs": true,
+    "write_auto_subs": true,
     "sub_lang": "en",
     "embed_subs": true,
     "no_warnings": false,
@@ -90,7 +92,8 @@ Edit `config.json` to customize the behavior:
 | `write_thumbnail` | Save video thumbnail |
 | `write_description` | Save video description |
 | `write_info_json` | Save video metadata as JSON |
-| `write_subs` | Download subtitles |
+| `write_subs` | Download manual subtitles |
+| `write_auto_subs` | Download auto-generated subtitles |
 | `sub_lang` | Subtitle language (e.g., "en", "en,es", "all") |
 | `embed_subs` | Embed subtitles into video file |
 | `ignore_errors` | Continue on download errors |
@@ -369,33 +372,36 @@ Available template variables:
 
 ### Subtitle Options
 
-**Download and embed English subtitles** (default configuration):
+**Download and embed English subtitles including auto-generated** (default configuration):
 ```json
 {
   "yt_dlp_options": {
     "write_subs": true,
+    "write_auto_subs": true,
     "sub_lang": "en",
     "embed_subs": true
   }
 }
 ```
 
-**Download multiple subtitle languages**:
+**Download multiple subtitle languages including auto-generated**:
 ```json
 {
   "yt_dlp_options": {
     "write_subs": true,
+    "write_auto_subs": true,
     "sub_lang": "en,es,fr",
     "embed_subs": true
   }
 }
 ```
 
-**Download all available subtitles**:
+**Download all available subtitles including auto-generated**:
 ```json
 {
   "yt_dlp_options": {
     "write_subs": true,
+    "write_auto_subs": true,
     "sub_lang": "all",
     "embed_subs": false
   }
@@ -403,11 +409,24 @@ Available template variables:
 ```
 Note: When using "all" languages, set `embed_subs` to `false` to save subtitles as separate files.
 
-**Disable subtitles**:
+**Download only auto-generated subtitles** (no manual subtitles):
 ```json
 {
   "yt_dlp_options": {
-    "write_subs": false
+    "write_subs": false,
+    "write_auto_subs": true,
+    "sub_lang": "en",
+    "embed_subs": true
+  }
+}
+```
+
+**Disable all subtitles**:
+```json
+{
+  "yt_dlp_options": {
+    "write_subs": false,
+    "write_auto_subs": false
   }
 }
 ```
