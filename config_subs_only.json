@@ -1,0 +1,15 @@
+{
+  "playlist_url": "https://www.youtube.com/watch?v=R13BD8qKeTg&list=PLgoP2gLGiq5P1hpzpZj7z02zefVUDA88_",
+  "download_path": "./downloads",
+  "archive_file": ".download_archive.txt",
+  "log_file": "downloader.log",
+  "check_interval_seconds": 60,
+  "yt_dlp_options": {
+    "skip_download": true,
+    "write_auto_subs": true,
+    "sub_lang": "en",
+    "embed_subs": false,
+    "ignore_errors": true,
+    "output_template": "%(playlist_title)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s"
+  }
+}

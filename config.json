@@ -11,6 +11,7 @@
     "write_description": true,
     "write_info_json": true,
     "write_subs": true,
+    "write_auto_subs": true,
     "sub_lang": "en",
     "embed_subs": true,
     "no_warnings": false,
