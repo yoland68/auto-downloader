@@ -1,7 +1,6 @@
 {
-  "playlist_url": "https://www.youtube.com/watch?v=R13BD8qKeTg&list=PLgoP2gLGiq5P1hpzpZj7z02zefVUDA88_",
+  "playlist_url": "https://www.youtube.com/watch?list=PLgoP2gLGiq5OE0uiQN9fHsq6cT_sjCPAq",
   "download_path": "./downloads",
-  "archive_file": ".download_archive.txt",
   "log_file": "downloader.log",
   "check_interval_seconds": 60,
   "yt_dlp_options": {
