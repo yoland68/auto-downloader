@@ -102,17 +102,18 @@ class PlaylistDownloader:
         #   cookies_from_browser: string name of browser (e.g., 'chrome')
         #   cookies_path: optional path to browser profile or cookies dir/file
         # If not provided, default to Chrome on macOS user profile directory.
+        # Format: --cookies-from-browser BROWSER:PATH (single colon-separated arg)
         cookies_browser = options.get('cookies_from_browser')
         cookies_path = options.get('cookies_path') or options.get('cookies_from_browser_path')
         if cookies_browser:
             if cookies_path:
-                cmd.extend(['--cookies-from-browser', cookies_browser, cookies_path])
+                cmd.extend(['--cookies-from-browser', f'{cookies_browser}:{cookies_path}'])
             else:
                 cmd.extend(['--cookies-from-browser', cookies_browser])
         else:
             # Default: use Chrome on macOS user's Library path
             default_chrome_path = str(Path.home() / 'Library' / 'Application Support' / 'Google' / 'Chrome')
-            cmd.extend(['--cookies-from-browser', 'chrome', default_chrome_path])
+            cmd.extend(['--cookies-from-browser', f'chrome:{default_chrome_path}'])
 
         # Add format
         if 'format' in options:
@@ -172,7 +173,7 @@ class PlaylistDownloader:
             self.logger.info(f"Playlist: {self.config.get('playlist_url')}")
 
             cmd = self._build_yt_dlp_command()
-            self.logger.debug(f"Command: {' '.join(cmd)}")
+            self.logger.info(f"Command: {' '.join(cmd)}")
 
             # Execute yt-dlp
             process = subprocess.Popen(
@@ -245,12 +246,12 @@ class PlaylistDownloader:
             cookies_path = options.get('cookies_path') or options.get('cookies_from_browser_path')
             if cookies_browser:
                 if cookies_path:
-                    cmd.extend(['--cookies-from-browser', cookies_browser, cookies_path])
+                    cmd.extend(['--cookies-from-browser', f'{cookies_browser}:{cookies_path}'])
                 else:
                     cmd.extend(['--cookies-from-browser', cookies_browser])
             else:
                 default_chrome_path = str(Path.home() / 'Library' / 'Application Support' / 'Google' / 'Chrome')
-                cmd.extend(['--cookies-from-browser', 'chrome', default_chrome_path])
+                cmd.extend(['--cookies-from-browser', f'chrome:{default_chrome_path}'])
 
             cmd.append(playlist_url)
 
