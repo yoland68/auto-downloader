@@ -13,6 +13,7 @@ Automatically download videos from a YouTube playlist using `yt-dlp`. The system
 - **Error Recovery**: Continues running even if individual downloads fail
 - **Metadata Saving**: Optionally save thumbnails, descriptions, and video info
 - **Subtitle Support**: Download both manual and auto-generated subtitles
+- **Google Drive Sync**: Automatically sync subtitles to Google Drive (macOS)
 
 ## Prerequisites
 
@@ -98,6 +99,36 @@ Edit `config.json` to customize the behavior:
 | `embed_subs` | Embed subtitles into video file |
 | `ignore_errors` | Continue on download errors |
 | `merge_output_format` | Final output format |
+
+### Google Drive Sync Options
+
+The system can automatically sync downloaded subtitle files to a Google Drive folder (requires Google Drive desktop app on macOS):
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `enabled` | Enable/disable Google Drive sync | `true` |
+| `sync_folder` | Path to Google Drive sync folder | `~/Documents/YT List Subtitles` |
+| `sync_archive` | File to track synced subtitles | `.subtitle_sync_archive.txt` |
+| `preserve_structure` | Keep folder structure (not currently implemented) | `false` |
+
+**Example configuration:**
+```json
+{
+  "google_drive_sync": {
+    "enabled": true,
+    "sync_folder": "~/Documents/YT List Subtitles",
+    "sync_archive": ".subtitle_sync_archive.txt",
+    "preserve_structure": false
+  }
+}
+```
+
+**How it works:**
+- After each download, subtitle (.vtt) files are automatically copied to the specified sync folder
+- Google Drive desktop app syncs the folder to the cloud
+- Archive tracking prevents re-copying files that are already synced
+- Sync happens immediately after download completion
+- If sync fails, download is still considered successful (graceful error handling)
 
 ## Usage
 
@@ -231,14 +262,17 @@ launchctl start com.user.playlist-downloader
 
 ```
 aududownloader/
-├── config.json              # Configuration file
-├── downloader.py            # Core download logic
-├── scheduler.py             # Scheduling and monitoring
-├── requirements.txt         # Python dependencies
-├── README.md               # This file
-├── .download_archive.txt   # Tracks downloaded videos (auto-generated)
-├── downloader.log          # Activity log (auto-generated)
-└── downloads/              # Downloaded videos (auto-generated)
+├── config.json                    # Configuration file
+├── config_subs_only.json          # Subtitle-only config
+├── downloader.py                  # Core download logic
+├── scheduler.py                   # Scheduling and monitoring
+├── subtitle_syncer.py             # Google Drive sync module
+├── requirements.txt               # Python dependencies
+├── README.md                      # This file
+├── .download_archive.txt          # Tracks downloaded videos (auto-generated)
+├── .subtitle_sync_archive.txt     # Tracks synced subtitles (auto-generated)
+├── downloader.log                 # Activity log (auto-generated)
+└── downloads/                     # Downloaded videos (auto-generated)
 ```
 
 ## How It Works
