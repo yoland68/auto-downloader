@@ -10,5 +10,11 @@
     "embed_subs": false,
     "ignore_errors": true,
     "output_template": "%(playlist_title)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s"
+  },
+  "google_drive_sync": {
+    "enabled": true,
+    "sync_folder": "~/Documents/YT List Subtitles",
+    "sync_archive": ".subtitle_sync_archive.txt",
+    "preserve_structure": false
   }
 }

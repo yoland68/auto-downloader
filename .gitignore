@@ -19,6 +19,7 @@ downloads/
 
 # Generated files
 .download_archive.txt
+.subtitle_sync_archive.txt
 *.log
 stdout.log
 stderr.log

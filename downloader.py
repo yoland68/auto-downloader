@@ -12,6 +12,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+from subtitle_syncer import SubtitleSyncer
+
 
 class PlaylistDownloader:
     """Manages downloading videos from YouTube playlists."""
@@ -27,6 +29,7 @@ class PlaylistDownloader:
         self.config = self._load_config()
         self._setup_logging()
         self._setup_directories()
+        self._setup_subtitle_sync()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from JSON file."""
@@ -73,6 +76,25 @@ class PlaylistDownloader:
         download_path = Path(self.config.get('download_path', './downloads'))
         download_path.mkdir(parents=True, exist_ok=True)
         self.logger.info(f"Download directory: {download_path.absolute()}")
+
+    def _setup_subtitle_sync(self):
+        """Setup Google Drive subtitle syncing if enabled."""
+        self.subtitle_syncer = None
+        sync_config = self.config.get('google_drive_sync', {})
+
+        if sync_config.get('enabled', False):
+            try:
+                self.subtitle_syncer = SubtitleSyncer(
+                    sync_folder=sync_config['sync_folder'],
+                    archive_file=sync_config.get('sync_archive', '.subtitle_sync_archive.txt'),
+                    download_path=self.config.get('download_path', './downloads')
+                )
+                self.logger.info(f"Google Drive sync enabled: {sync_config['sync_folder']}")
+            except Exception as e:
+                self.logger.warning(f"Failed to setup Google Drive sync: {e}")
+                self.subtitle_syncer = None
+        else:
+            self.logger.info("Google Drive sync is disabled")
 
     def _build_yt_dlp_command(self) -> list:
         """
@@ -207,6 +229,16 @@ class PlaylistDownloader:
             if return_code == 0:
                 if new_downloads > 0:
                     self.logger.info(f"Successfully downloaded {new_downloads} new video(s)")
+
+                    # Sync subtitles to Google Drive if enabled
+                    if self.subtitle_syncer:
+                        try:
+                            self.logger.info("Syncing subtitles to Google Drive...")
+                            synced, skipped = self.subtitle_syncer.sync_subtitles()
+                            if synced > 0:
+                                self.logger.info(f"Synced {synced} subtitle(s) to Google Drive")
+                        except Exception as e:
+                            self.logger.error(f"Failed to sync subtitles: {e}")
                 else:
                     self.logger.info("No new videos found in playlist")
                 return True
