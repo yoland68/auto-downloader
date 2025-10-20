@@ -50,7 +50,7 @@ class SubtitleSyncer:
 
     def _find_subtitle_files(self) -> List[Path]:
         """
-        Find all subtitle (.vtt) files in the download directory.
+        Find all subtitle (.srt) files in the download directory.
 
         Returns:
             List of Path objects for subtitle files
@@ -61,10 +61,10 @@ class SubtitleSyncer:
             self.logger.warning(f"Download path does not exist: {self.download_path}")
             return subtitle_files
 
-        # Search for .vtt files recursively
-        for vtt_file in self.download_path.rglob("*.vtt"):
-            if vtt_file.is_file():
-                subtitle_files.append(vtt_file)
+        # Search for .srt files recursively
+        for srt_file in self.download_path.rglob("*.srt"):
+            if srt_file.is_file():
+                subtitle_files.append(srt_file)
 
         return subtitle_files
 
@@ -108,7 +108,7 @@ class SubtitleSyncer:
         skipped_count = 0
 
         for source_file in subtitle_files:
-            # Change extension from .vtt to .txt
+            # Change extension from .srt to .txt
             dest_filename = source_file.stem + '.txt'
             dest_file = self.sync_folder / dest_filename
 
@@ -148,11 +148,11 @@ class SubtitleSyncer:
         Returns:
             True if synced successfully, False otherwise
         """
-        if not subtitle_path.exists() or not subtitle_path.suffix == '.vtt':
+        if not subtitle_path.exists() or not subtitle_path.suffix == '.srt':
             self.logger.warning(f"Invalid subtitle file: {subtitle_path}")
             return False
 
-        # Change extension from .vtt to .txt
+        # Change extension from .srt to .txt
         dest_filename = subtitle_path.stem + '.txt'
         dest_file = self.sync_folder / dest_filename
 

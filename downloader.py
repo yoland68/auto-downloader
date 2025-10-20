@@ -6,11 +6,12 @@ This module handles downloading videos from a YouTube playlist using yt-dlp.
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from subtitle_syncer import SubtitleSyncer
 
@@ -182,6 +183,76 @@ class PlaylistDownloader:
 
         return cmd
 
+    def _download_srt_for_video(self, video_id: str) -> bool:
+        """
+        Download SRT subtitle for a specific video.
+
+        Args:
+            video_id: YouTube video ID
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            self.logger.info(f"Downloading SRT subtitle for video: {video_id}")
+
+            download_path = self.config.get('download_path', './downloads')
+            options = self.config.get('yt_dlp_options', {})
+
+            # Build SRT download command
+            cmd = [
+                'yt-dlp',
+                '--skip-download',
+                '--write-subs',
+                '--write-auto-subs',
+                '--sub-langs', 'en',
+                '--convert-subs', 'srt',
+                '--paths', download_path,
+            ]
+
+            # Add cookies-from-browser (same as main download)
+            cookies_browser = options.get('cookies_from_browser')
+            cookies_path = options.get('cookies_path') or options.get('cookies_from_browser_path')
+            if cookies_browser:
+                if cookies_path:
+                    cmd.extend(['--cookies-from-browser', f'{cookies_browser}:{cookies_path}'])
+                else:
+                    cmd.extend(['--cookies-from-browser', cookies_browser])
+            else:
+                # Default: use Chrome on macOS user's Library path
+                default_chrome_path = str(Path.home() / 'Library' / 'Application Support' / 'Google' / 'Chrome')
+                cmd.extend(['--cookies-from-browser', f'chrome:{default_chrome_path}'])
+
+            # Add output template (same as main download)
+            if 'output_template' in options:
+                cmd.extend(['--output', options['output_template']])
+
+            # Add video URL
+            cmd.append(video_url)
+
+            # Execute yt-dlp for SRT download
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if result.returncode == 0:
+                self.logger.info(f"Successfully downloaded SRT subtitle for {video_id}")
+                return True
+            else:
+                self.logger.warning(f"Failed to download SRT for {video_id}: {result.stderr}")
+                return False
+
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"SRT download timeout for {video_id}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error downloading SRT for {video_id}: {e}")
+            return False
+
     def download(self) -> bool:
         """
         Execute the download process.
@@ -206,8 +277,9 @@ class PlaylistDownloader:
                 bufsize=1
             )
 
-            # Stream output
+            # Stream output and track downloaded video IDs
             new_downloads = 0
+            downloaded_video_ids = []
             for line in process.stdout:
                 line = line.rstrip()
                 if line:
@@ -215,6 +287,14 @@ class PlaylistDownloader:
                     if '[download]' in line and 'Destination:' in line:
                         self.logger.info(line)
                         new_downloads += 1
+
+                        # Extract video ID from the destination line
+                        # Format: [download] Destination: downloads/WL-test/20170405 - Title [VIDEO_ID].ext
+                        video_id_match = re.search(r'\[([A-Za-z0-9_-]{11})\]\.', line)
+                        if video_id_match:
+                            video_id = video_id_match.group(1)
+                            downloaded_video_ids.append(video_id)
+                            self.logger.debug(f"Extracted video ID: {video_id}")
                     elif 'has already been recorded' in line:
                         # Video already downloaded
                         pass
@@ -229,6 +309,15 @@ class PlaylistDownloader:
             if return_code == 0:
                 if new_downloads > 0:
                     self.logger.info(f"Successfully downloaded {new_downloads} new video(s)")
+
+                    # Download SRT subtitles for each newly downloaded video
+                    if downloaded_video_ids:
+                        self.logger.info(f"Downloading SRT subtitles for {len(downloaded_video_ids)} video(s)...")
+                        srt_success_count = 0
+                        for video_id in downloaded_video_ids:
+                            if self._download_srt_for_video(video_id):
+                                srt_success_count += 1
+                        self.logger.info(f"Downloaded {srt_success_count}/{len(downloaded_video_ids)} SRT subtitle(s)")
 
                     # Sync subtitles to Google Drive if enabled
                     if self.subtitle_syncer:
