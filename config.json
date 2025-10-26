@@ -17,7 +17,8 @@
     "no_warnings": false,
     "ignore_errors": true,
     "no_playlist": false,
-    "merge_output_format": "mp4"
+    "merge_output_format": "mp4",
+    "extractor_args": "youtube:player_client=android,web;player_skip=configs,webpage"
   },
   "google_drive_sync": {
     "enabled": true,

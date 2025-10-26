@@ -174,6 +174,10 @@ class PlaylistDownloader:
         if 'merge_output_format' in options:
             cmd.extend(['--merge-output-format', options['merge_output_format']])
 
+        # Add extractor arguments (for bypassing YouTube restrictions)
+        if 'extractor_args' in options:
+            cmd.extend(['--extractor-args', options['extractor_args']])
+
         # Add skip download option (for subtitle-only downloads)
         if options.get('skip_download'):
             cmd.append('--skip-download')
@@ -227,6 +231,10 @@ class PlaylistDownloader:
             # Add output template (same as main download)
             if 'output_template' in options:
                 cmd.extend(['--output', options['output_template']])
+
+            # Add extractor arguments (for bypassing YouTube restrictions)
+            if 'extractor_args' in options:
+                cmd.extend(['--extractor-args', options['extractor_args']])
 
             # Add video URL
             cmd.append(video_url)
