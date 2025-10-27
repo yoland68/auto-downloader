@@ -18,6 +18,7 @@ downloads/
 *.mp3
 
 # Generated files
+*.txt
 .download_archive.txt
 .subtitle_sync_archive.txt
 *.log

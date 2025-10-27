@@ -4,6 +4,9 @@
   "archive_file": ".download_archive.txt",
   "log_file": "downloader.log",
   "check_interval_seconds": 60,
+  "download_interval_hours": 1,
+  "playlist_cache_file": ".playlist_cache.txt",
+  "download_queue_file": ".download_queue.txt",
   "yt_dlp_options": {
     "format": "bestvideo*+bestaudio/best",
     "output_template": "%(playlist_title)s/%(upload_date)s - %(title)s [%(id)s].%(ext)s",

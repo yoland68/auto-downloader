@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from subtitle_syncer import SubtitleSyncer
+from playlist_manager import PlaylistManager
 
 
 class PlaylistDownloader:
@@ -31,6 +32,7 @@ class PlaylistDownloader:
         self._setup_logging()
         self._setup_directories()
         self._setup_subtitle_sync()
+        self._setup_playlist_manager()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from JSON file."""
@@ -96,6 +98,24 @@ class PlaylistDownloader:
                 self.subtitle_syncer = None
         else:
             self.logger.info("Google Drive sync is disabled")
+
+    def _setup_playlist_manager(self):
+        """Setup playlist manager for queue-based downloads."""
+        try:
+            options = self.config.get('yt_dlp_options', {})
+            self.playlist_manager = PlaylistManager(
+                playlist_url=self.config.get('playlist_url'),
+                cache_file=self.config.get('playlist_cache_file', '.playlist_cache.txt'),
+                archive_file=self.config.get('archive_file', '.download_archive.txt'),
+                queue_file=self.config.get('download_queue_file', '.download_queue.txt'),
+                cookies_browser=options.get('cookies_from_browser'),
+                cookies_path=options.get('cookies_path') or options.get('cookies_from_browser_path'),
+                extractor_args=options.get('extractor_args')
+            )
+            self.logger.info("Playlist manager initialized")
+        except Exception as e:
+            self.logger.error(f"Failed to setup playlist manager: {e}")
+            self.playlist_manager = None
 
     def _build_yt_dlp_command(self) -> list:
         """
@@ -259,6 +279,149 @@ class PlaylistDownloader:
             return False
         except Exception as e:
             self.logger.error(f"Error downloading SRT for {video_id}: {e}")
+            return False
+
+    def download_single_video(self, video_id: str) -> bool:
+        """
+        Download a single video and its subtitles.
+
+        Args:
+            video_id: YouTube video ID to download
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            self.logger.info("=" * 60)
+            self.logger.info(f"Downloading single video: {video_id}")
+            self.logger.info(f"URL: {video_url}")
+
+            download_path = self.config.get('download_path', './downloads')
+            archive_file = self.config.get('archive_file', '.download_archive.txt')
+            options = self.config.get('yt_dlp_options', {})
+
+            # Build command for single video download
+            cmd = [
+                'yt-dlp',
+                '--download-archive', archive_file,
+                '--paths', download_path,
+            ]
+
+            # Add cookies-from-browser
+            cookies_browser = options.get('cookies_from_browser')
+            cookies_path = options.get('cookies_path') or options.get('cookies_from_browser_path')
+            if cookies_browser:
+                if cookies_path:
+                    cmd.extend(['--cookies-from-browser', f'{cookies_browser}:{cookies_path}'])
+                else:
+                    cmd.extend(['--cookies-from-browser', cookies_browser])
+            else:
+                # Default: use Chrome on macOS user's Library path
+                default_chrome_path = str(Path.home() / 'Library' / 'Application Support' / 'Google' / 'Chrome')
+                cmd.extend(['--cookies-from-browser', f'chrome:{default_chrome_path}'])
+
+            # Add format
+            if 'format' in options:
+                cmd.extend(['--format', options['format']])
+
+            # Add output template
+            if 'output_template' in options:
+                cmd.extend(['--output', options['output_template']])
+
+            # Add metadata options
+            if options.get('write_thumbnail'):
+                cmd.append('--write-thumbnail')
+            if options.get('write_description'):
+                cmd.append('--write-description')
+            if options.get('write_info_json'):
+                cmd.append('--write-info-json')
+
+            # Add subtitle options
+            if options.get('write_subs'):
+                cmd.append('--write-subs')
+            if options.get('write_auto_subs'):
+                cmd.append('--write-auto-subs')
+            if 'sub_lang' in options:
+                cmd.extend(['--sub-lang', options['sub_lang']])
+            if options.get('embed_subs'):
+                cmd.append('--embed-subs')
+
+            # Add error handling options
+            if options.get('ignore_errors'):
+                cmd.append('--ignore-errors')
+
+            # Add merge format
+            if 'merge_output_format' in options:
+                cmd.extend(['--merge-output-format', options['merge_output_format']])
+
+            # Add extractor arguments
+            if 'extractor_args' in options:
+                cmd.extend(['--extractor-args', options['extractor_args']])
+
+            # Add video URL
+            cmd.append(video_url)
+
+            self.logger.info(f"Command: {' '.join(cmd)}")
+
+            # Execute yt-dlp for video download
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
+
+            # Stream output
+            download_success = False
+            for line in process.stdout:
+                line = line.rstrip()
+                if line:
+                    # Log important lines
+                    if '[download]' in line and 'Destination:' in line:
+                        self.logger.info(line)
+                        download_success = True
+                    elif 'has already been recorded' in line:
+                        self.logger.info(f"Video {video_id} already downloaded")
+                        download_success = True
+                    elif '[download] 100%' in line:
+                        self.logger.info(line)
+                    elif 'ERROR' in line or 'WARNING' in line:
+                        self.logger.warning(line)
+
+            return_code = process.wait()
+
+            if return_code == 0 and download_success:
+                self.logger.info(f"Successfully downloaded video: {video_id}")
+
+                # Download SRT subtitle
+                self.logger.info("Downloading SRT subtitle...")
+                if self._download_srt_for_video(video_id):
+                    self.logger.info("SRT subtitle downloaded successfully")
+                else:
+                    self.logger.warning("Failed to download SRT subtitle")
+
+                # Sync subtitles to Google Drive if enabled
+                if self.subtitle_syncer:
+                    try:
+                        self.logger.info("Syncing subtitles to Google Drive...")
+                        synced, skipped = self.subtitle_syncer.sync_subtitles()
+                        if synced > 0:
+                            self.logger.info(f"Synced {synced} subtitle(s) to Google Drive")
+                    except Exception as e:
+                        self.logger.error(f"Failed to sync subtitles: {e}")
+
+                self.logger.info("=" * 60)
+                return True
+            else:
+                self.logger.error(f"Failed to download video {video_id} (exit code: {return_code})")
+                self.logger.info("=" * 60)
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error downloading video {video_id}: {e}", exc_info=True)
+            self.logger.info("=" * 60)
             return False
 
     def download(self) -> bool:

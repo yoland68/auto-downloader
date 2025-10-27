@@ -34,6 +34,9 @@ class DownloadScheduler:
         self.download_lock = Lock()  # Prevent concurrent downloads
         self.is_downloading = False
         self.skipped_checks = 0
+        self.last_download_time = 0  # Track when last download occurred
+        self.videos_downloaded = 0  # Count successful downloads
+        self.rate_limit_skips = 0  # Count checks skipped due to rate limit
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -45,6 +48,35 @@ class DownloadScheduler:
         """Handle shutdown signals gracefully."""
         self.logger.info(f"\nReceived signal {signum}. Shutting down gracefully...")
         self.running = False
+
+    def _check_rate_limit(self) -> bool:
+        """
+        Check if enough time has passed since last download.
+
+        Returns:
+            True if download is allowed, False if rate limited
+        """
+        download_interval_hours = self.downloader.config.get('download_interval_hours', 1)
+
+        # If set to 0, disable rate limiting (original behavior)
+        if download_interval_hours == 0:
+            return True
+
+        download_interval_seconds = download_interval_hours * 3600
+        current_time = time.time()
+        time_since_last_download = current_time - self.last_download_time
+
+        if time_since_last_download >= download_interval_seconds:
+            return True
+        else:
+            time_remaining = download_interval_seconds - time_since_last_download
+            hours = int(time_remaining // 3600)
+            minutes = int((time_remaining % 3600) // 60)
+            seconds = int(time_remaining % 60)
+            self.logger.info(
+                f"Rate limit: Next download available in {hours:02d}:{minutes:02d}:{seconds:02d}"
+            )
+            return False
 
     def download_job(self):
         """Job function that gets executed on schedule."""
@@ -66,7 +98,56 @@ class DownloadScheduler:
                 f"Check #{self.check_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
 
-            self.downloader.download()
+            # Check rate limit
+            if not self._check_rate_limit():
+                self.rate_limit_skips += 1
+                self.logger.info(f"Check #{self.check_count} - SKIPPED (rate limit)")
+                return
+
+            # Check if playlist manager is available
+            if not self.downloader.playlist_manager:
+                self.logger.error("Playlist manager not initialized. Using legacy download mode.")
+                self.downloader.download()
+                duration = time.time() - start_time
+                self.logger.info(f"Check completed in {duration:.1f} seconds")
+                return
+
+            # Get next video from queue
+            next_video = self.downloader.playlist_manager.get_next_video()
+
+            if not next_video:
+                self.logger.info("Download queue is empty. Checking for new videos...")
+
+                # Refresh cache and queue to detect new videos
+                if self.downloader.playlist_manager.refresh_cache_and_queue():
+                    next_video = self.downloader.playlist_manager.get_next_video()
+
+                    if not next_video:
+                        self.logger.info("No new videos found in playlist. All caught up!")
+                        status = self.downloader.playlist_manager.get_queue_status()
+                        self.logger.info(
+                            f"Status: {status['downloaded']}/{status['total_videos']} videos downloaded"
+                        )
+                    else:
+                        queue = self.downloader.playlist_manager.load_download_queue()
+                        self.logger.info(f"Found {len(queue)} new video(s) in playlist")
+                else:
+                    self.logger.error("Failed to refresh playlist cache")
+                    return
+
+            # Download single video if available
+            if next_video:
+                queue_length = len(self.downloader.playlist_manager.load_download_queue())
+                self.logger.info(f"Downloading video {next_video} ({queue_length} remaining in queue)")
+
+                if self.downloader.download_single_video(next_video):
+                    # Remove from queue on success
+                    self.downloader.playlist_manager.remove_from_queue(next_video)
+                    self.last_download_time = time.time()
+                    self.videos_downloaded += 1
+                    self.logger.info(f"Total videos downloaded this session: {self.videos_downloaded}")
+                else:
+                    self.logger.error(f"Failed to download video {next_video}. Will retry on next check.")
 
             duration = time.time() - start_time
             self.logger.info(f"Check completed in {duration:.1f} seconds")
@@ -85,7 +166,16 @@ class DownloadScheduler:
         self.logger.info(f"Monitoring playlist: {self.downloader.config.get('playlist_url')}")
         self.logger.info(f"Download path: {Path(self.downloader.config.get('download_path')).absolute()}")
         self.logger.info(f"Check interval: {self.downloader.config.get('check_interval_seconds', 60)} seconds")
+
+        download_interval_hours = self.downloader.config.get('download_interval_hours', 1)
+        if download_interval_hours == 0:
+            self.logger.info("Rate limiting: DISABLED (downloads as fast as possible)")
+        else:
+            self.logger.info(f"Rate limiting: 1 video every {download_interval_hours} hour(s)")
+
         self.logger.info(f"Archive file: {self.downloader.config.get('archive_file')}")
+        self.logger.info(f"Queue file: {self.downloader.config.get('download_queue_file', '.download_queue.txt')}")
+        self.logger.info(f"Cache file: {self.downloader.config.get('playlist_cache_file', '.playlist_cache.txt')}")
         self.logger.info("=" * 70)
         self.logger.info("Press Ctrl+C to stop")
         self.logger.info("")
@@ -113,6 +203,9 @@ class DownloadScheduler:
         self.logger.info(f"Total checks performed: {self.check_count}")
         if self.skipped_checks > 0:
             self.logger.info(f"Checks skipped due to long downloads: {self.skipped_checks}")
+        if self.rate_limit_skips > 0:
+            self.logger.info(f"Checks skipped due to rate limiting: {self.rate_limit_skips}")
+        self.logger.info(f"Videos downloaded this session: {self.videos_downloaded}")
 
 
 def main():
