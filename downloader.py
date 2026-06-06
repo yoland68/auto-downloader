@@ -6,9 +6,11 @@ This module handles downloading videos from a YouTube playlist using yt-dlp.
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -116,6 +118,81 @@ class PlaylistDownloader:
         except Exception as e:
             self.logger.error(f"Failed to setup playlist manager: {e}")
             self.playlist_manager = None
+
+    def _inject_description_to_metadata(self, video_id: str) -> bool:
+        """
+        Embed the YouTube description into the video file's synopsis/ldes tag
+        so media apps like Infuse display it as the Summary field.
+
+        Uses ffmpeg stream-copy (no re-encode). Reads description from the
+        .info.json sidecar saved by yt-dlp.
+        """
+        if not self.config.get('inject_description_to_summary', False):
+            return False
+
+        download_path = Path(self.config.get('download_path', './downloads'))
+        matches = list(download_path.rglob(f'*[{video_id}].mp4'))
+        if not matches:
+            self.logger.warning(f"inject_description: no mp4 found for {video_id}")
+            return False
+
+        video_path = matches[0]
+        info_path = video_path.with_suffix('.info.json')
+        if not info_path.exists():
+            self.logger.warning(f"inject_description: .info.json not found at {info_path}")
+            return False
+
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                info = json.load(f)
+            description = info.get('description', '').strip()
+            if not description:
+                self.logger.info(f"inject_description: no description in .info.json for {video_id}")
+                return False
+        except Exception as e:
+            self.logger.error(f"inject_description: failed to read .info.json: {e}")
+            return False
+
+        # Write to a temp file in the same directory, then atomically replace.
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix='.mp4', dir=video_path.parent, prefix='.tmp_'
+            )
+            os.close(tmp_fd)
+
+            result = subprocess.run(
+                [
+                    'ffmpeg', '-y',
+                    '-i', str(video_path),
+                    '-metadata', f'synopsis={description}',
+                    '-metadata', f'description={description}',
+                    '-c', 'copy',
+                    tmp_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            if result.returncode != 0:
+                self.logger.error(
+                    f"inject_description: ffmpeg failed for {video_id}: {result.stderr[-500:]}"
+                )
+                Path(tmp_path).unlink(missing_ok=True)
+                return False
+
+            os.replace(tmp_path, video_path)
+            self.logger.info(f"inject_description: embedded description into {video_path.name}")
+            return True
+
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"inject_description: ffmpeg timed out for {video_id}")
+            Path(tmp_path).unlink(missing_ok=True)
+            return False
+        except Exception as e:
+            self.logger.error(f"inject_description: unexpected error for {video_id}: {e}")
+            Path(tmp_path).unlink(missing_ok=True)
+            return False
 
     def _build_yt_dlp_command(self) -> list:
         """
@@ -402,6 +479,9 @@ class PlaylistDownloader:
                 else:
                     self.logger.warning("Failed to download SRT subtitle")
 
+                # Inject description into video Summary metadata
+                self._inject_description_to_metadata(video_id)
+
                 # Sync subtitles to Google Drive if enabled
                 if self.subtitle_syncer:
                     try:
@@ -489,6 +569,10 @@ class PlaylistDownloader:
                             if self._download_srt_for_video(video_id):
                                 srt_success_count += 1
                         self.logger.info(f"Downloaded {srt_success_count}/{len(downloaded_video_ids)} SRT subtitle(s)")
+
+                    # Inject description into Summary metadata for each video
+                    for video_id in downloaded_video_ids:
+                        self._inject_description_to_metadata(video_id)
 
                     # Sync subtitles to Google Drive if enabled
                     if self.subtitle_syncer:
