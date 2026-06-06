@@ -22,6 +22,7 @@
     "no_playlist": false,
     "merge_output_format": "mp4"
   },
+  "inject_description_to_summary": true,
   "google_drive_sync": {
     "enabled": true,
     "sync_folder": "~/Documents/YT List Subtitles",
