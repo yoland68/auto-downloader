@@ -22,6 +22,7 @@ downloads/
 .download_archive.txt
 .subtitle_sync_archive.txt
 *.log
+*.log.[0-9]*
 stdout.log
 stderr.log
 
