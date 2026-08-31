@@ -37,5 +37,10 @@ Thumbs.db
 *.swo
 *~
 
+# Secrets -- never commit (Gemini + Supabase service-role keys)
+.env
+.env.*
+!.env.example
+
 # Config (if you want to keep your config private)
 # config.json
