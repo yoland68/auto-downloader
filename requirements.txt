@@ -6,3 +6,10 @@ schedule==1.2.0
 
 # Python wrapper for yt-dlp (optional, but useful for advanced features)
 # We'll use subprocess to call yt-dlp directly for better control
+
+# Gemini API client for video summarization (needs GEMINI_API_KEY env var)
+google-genai
+
+# Supabase REST push of summaries to glance (needs SUPABASE_URL +
+# SUPABASE_SERVICE_ROLE_KEY env vars)
+requests

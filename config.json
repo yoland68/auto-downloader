@@ -23,6 +23,19 @@
     "merge_output_format": "mp4"
   },
   "inject_description_to_summary": true,
+  "summarize": {
+    "enabled": true,
+    "gemini_model": "gemini-2.5-flash",
+    "input_mode": "auto",
+    "url_max_duration_s": 7200,
+    "max_output_tokens": 4096,
+    "request_timeout_s": 300,
+    "max_retries": 3,
+    "inject_summary_to_metadata": true,
+    "glance_push": true,
+    "glance_table": "youtube_videos",
+    "push_failed_file": ".glance_push_failed.txt"
+  },
   "google_drive_sync": {
     "enabled": true,
     "sync_folder": "~/Documents/YT List Subtitles",
