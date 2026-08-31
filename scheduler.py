@@ -37,6 +37,9 @@ class DownloadScheduler:
         self.last_download_time = 0  # Track when last download occurred
         self.videos_downloaded = 0  # Count successful downloads
         self.rate_limit_skips = 0  # Count checks skipped due to rate limit
+        self.last_refresh_time = 0  # When the playlist cache was last refreshed
+        self.consecutive_refresh_failures = 0  # Drives exponential backoff
+        self.next_refresh_allowed = 0  # Epoch seconds; set while backing off
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -78,6 +81,86 @@ class DownloadScheduler:
             )
             return False
 
+    def _refresh_interval_seconds(self) -> float:
+        """Base interval between playlist refreshes, in seconds."""
+        hours = self.downloader.config.get('playlist_refresh_interval_hours', 1)
+        return float(hours) * 3600
+
+    def _should_refresh_playlist(self) -> bool:
+        """
+        Decide whether to re-fetch the playlist.
+
+        An empty queue used to trigger a full playlist fetch on every check
+        (once a minute), which is what got this account throttled by YouTube.
+        Refreshes are now spaced by playlist_refresh_interval_hours, and backed
+        off further after consecutive failures.
+
+        Returns:
+            True if a refresh should run now
+        """
+        now = time.time()
+
+        if now < self.next_refresh_allowed:
+            remaining = int(self.next_refresh_allowed - now)
+            self.logger.debug(
+                f"Playlist refresh backing off after "
+                f"{self.consecutive_refresh_failures} failure(s); "
+                f"retrying in {remaining // 60:02d}:{remaining % 60:02d}"
+            )
+            return False
+
+        interval_seconds = self._refresh_interval_seconds()
+        if interval_seconds <= 0:
+            return True
+
+        elapsed = now - self.last_refresh_time
+        if elapsed >= interval_seconds:
+            return True
+
+        remaining = int(interval_seconds - elapsed)
+        self.logger.debug(
+            f"Playlist refresh not due for "
+            f"{remaining // 3600:02d}:{(remaining % 3600) // 60:02d}:{remaining % 60:02d}"
+        )
+        return False
+
+    def _record_refresh_result(self, success: bool):
+        """
+        Record the outcome of a refresh and schedule the next attempt.
+
+        On failure the delay doubles per consecutive failure, capped by
+        playlist_refresh_backoff_max_hours, so a throttled or broken fetch
+        stops hammering YouTube every check.
+        """
+        now = time.time()
+        self.last_refresh_time = now
+
+        if success:
+            if self.consecutive_refresh_failures:
+                self.logger.info(
+                    f"Playlist refresh recovered after "
+                    f"{self.consecutive_refresh_failures} consecutive failure(s)"
+                )
+            self.consecutive_refresh_failures = 0
+            self.next_refresh_allowed = 0
+            return
+
+        self.consecutive_refresh_failures += 1
+
+        # Floor the base so backoff still applies when refreshing is unthrottled.
+        base = max(self._refresh_interval_seconds(), 300)
+        max_backoff = float(
+            self.downloader.config.get('playlist_refresh_backoff_max_hours', 6)
+        ) * 3600
+        delay = min(base * (2 ** (self.consecutive_refresh_failures - 1)), max_backoff)
+        self.next_refresh_allowed = now + delay
+
+        self.logger.error(
+            f"Playlist refresh failed {self.consecutive_refresh_failures} time(s) "
+            f"in a row; next attempt in {int(delay) // 3600:02d}:"
+            f"{(int(delay) % 3600) // 60:02d}:{int(delay) % 60:02d}"
+        )
+
     def download_job(self):
         """Job function that gets executed on schedule."""
         self.check_count += 1
@@ -116,10 +199,18 @@ class DownloadScheduler:
             next_video = self.downloader.playlist_manager.get_next_video()
 
             if not next_video:
+                # Gate the refresh: an empty queue must not re-fetch the whole
+                # playlist on every check.
+                if not self._should_refresh_playlist():
+                    return
+
                 self.logger.info("Download queue is empty. Checking for new videos...")
 
                 # Refresh cache and queue to detect new videos
-                if self.downloader.playlist_manager.refresh_cache_and_queue():
+                refreshed = self.downloader.playlist_manager.refresh_cache_and_queue()
+                self._record_refresh_result(refreshed)
+
+                if refreshed:
                     next_video = self.downloader.playlist_manager.get_next_video()
 
                     if not next_video:
@@ -172,6 +263,16 @@ class DownloadScheduler:
             self.logger.info("Rate limiting: DISABLED (downloads as fast as possible)")
         else:
             self.logger.info(f"Rate limiting: 1 video every {download_interval_hours} hour(s)")
+
+        refresh_hours = self.downloader.config.get('playlist_refresh_interval_hours', 1)
+        if refresh_hours == 0:
+            self.logger.info("Playlist refresh: every check (NOT recommended)")
+        else:
+            self.logger.info(f"Playlist refresh: at most once every {refresh_hours} hour(s)")
+        self.logger.info(
+            f"Playlist fetch timeout: "
+            f"{self.downloader.config.get('playlist_fetch_timeout_seconds', 300)}s"
+        )
 
         self.logger.info(f"Archive file: {self.downloader.config.get('archive_file')}")
         self.logger.info(f"Queue file: {self.downloader.config.get('download_queue_file', '.download_queue.txt')}")

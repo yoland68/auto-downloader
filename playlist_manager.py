@@ -7,6 +7,7 @@ Handles playlist caching, queue management, and missing video detection.
 import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Set, Optional
 
@@ -22,7 +23,8 @@ class PlaylistManager:
         queue_file: str = ".download_queue.txt",
         cookies_browser: Optional[str] = None,
         cookies_path: Optional[str] = None,
-        extractor_args: Optional[str] = None
+        extractor_args: Optional[str] = None,
+        fetch_timeout_seconds: int = 300
     ):
         """
         Initialize the playlist manager.
@@ -35,6 +37,7 @@ class PlaylistManager:
             cookies_browser: Browser to extract cookies from
             cookies_path: Path to browser cookies
             extractor_args: yt-dlp extractor arguments
+            fetch_timeout_seconds: Hard timeout for a single playlist fetch
         """
         self.playlist_url = playlist_url
         self.cache_file = Path(cache_file)
@@ -43,6 +46,7 @@ class PlaylistManager:
         self.cookies_browser = cookies_browser
         self.cookies_path = cookies_path
         self.extractor_args = extractor_args
+        self.fetch_timeout_seconds = fetch_timeout_seconds
         self.logger = logging.getLogger('PlaylistManager')
 
     def _build_base_command(self) -> List[str]:
@@ -83,26 +87,42 @@ class PlaylistManager:
                 self.playlist_url
             ])
 
+            self.logger.debug(f"Playlist fetch command: {' '.join(cmd)}")
+
+            started = time.monotonic()
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=self.fetch_timeout_seconds
             )
+            elapsed = time.monotonic() - started
 
             if result.returncode == 0:
                 video_ids = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-                self.logger.info(f"Found {len(video_ids)} videos in playlist")
+                self.logger.info(
+                    f"Found {len(video_ids)} videos in playlist in {elapsed:.1f}s"
+                )
                 return video_ids
             else:
-                self.logger.error(f"Failed to fetch playlist: {result.stderr}")
+                self.logger.error(
+                    f"Failed to fetch playlist after {elapsed:.1f}s "
+                    f"(exit code {result.returncode})"
+                )
+                stderr = (result.stderr or '').strip()
+                if stderr:
+                    self.logger.error(f"Playlist fetch stderr:\n{stderr[-2000:]}")
                 return []
 
         except subprocess.TimeoutExpired:
-            self.logger.error("Playlist fetch timeout")
+            self.logger.error(
+                f"Playlist fetch timed out after {self.fetch_timeout_seconds}s. "
+                f"YouTube may be throttling this account; consider raising "
+                f"'playlist_fetch_timeout_seconds' in config.json."
+            )
             return []
         except Exception as e:
-            self.logger.error(f"Error fetching playlist: {e}")
+            self.logger.error(f"Error fetching playlist: {e}", exc_info=True)
             return []
 
     def save_playlist_cache(self, video_ids: List[str]) -> bool:
