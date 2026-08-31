@@ -20,6 +20,8 @@ from typing import Dict, Any, Optional, List
 
 from subtitle_syncer import SubtitleSyncer
 from playlist_manager import PlaylistManager
+from summarizer import VideoSummarizer, find_video_file
+from glance_push import GlancePusher
 
 
 class PlaylistDownloader:
@@ -38,6 +40,7 @@ class PlaylistDownloader:
         self._setup_directories()
         self._setup_subtitle_sync()
         self._setup_playlist_manager()
+        self._setup_summarizer()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from JSON file."""
@@ -148,6 +151,36 @@ class PlaylistDownloader:
             self.logger.error(f"Failed to setup playlist manager: {e}")
             self.playlist_manager = None
 
+    def _setup_summarizer(self):
+        """Setup Gemini summarization + glance push (both optional)."""
+        self.summarizer = None
+        self.glance_pusher = None
+        try:
+            self.summarizer = VideoSummarizer(self.config, logger=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Failed to setup summarizer: {e}")
+        try:
+            self.glance_pusher = GlancePusher(self.config, logger=self.logger)
+        except Exception as e:
+            self.logger.warning(f"Failed to setup glance push: {e}")
+
+    def _summarize_and_push(self, video_id: str):
+        """Post-download: Gemini summary + sidecar + mp4 metadata + glance upsert.
+
+        All failures are logged and swallowed; never fails the download.
+        Falls back to the legacy description-inject when summarization is
+        disabled or fails.
+        """
+        record = None
+        if self.summarizer and self.summarizer.enabled:
+            record = self.summarizer.summarize_video(video_id)
+        if record is None:
+            # summarizer disabled or failed: keep legacy behavior
+            self._inject_description_to_metadata(video_id)
+            return
+        if self.glance_pusher and self.glance_pusher.enabled:
+            self.glance_pusher.push_video(record)  # failure -> retry file, logged
+
     @contextmanager
     def _step(self, label: str):
         """
@@ -200,14 +233,13 @@ class PlaylistDownloader:
             return False
 
         download_path = Path(self.config.get('download_path', './downloads'))
-        # Note: video_id is wrapped in brackets in the filename, which glob would
-        # treat as a character class -- match on substring instead.
-        matches = [f for f in download_path.rglob('*.mp4') if f'[{video_id}]' in f.name]
-        if not matches:
+        # NOTE: rglob(f'*[{video_id}].mp4') is wrong -- glob treats [...] as a
+        # character class, so it never matches the literal brackets in our
+        # filenames. find_video_file filters by substring instead.
+        video_path = find_video_file(download_path, video_id)
+        if not video_path:
             self.logger.warning(f"inject_description: no mp4 found for {video_id}")
             return False
-
-        video_path = matches[0]
         info_path = video_path.with_suffix('.info.json')
         if not info_path.exists():
             self.logger.warning(f"inject_description: .info.json not found at {info_path}")
@@ -597,9 +629,10 @@ class PlaylistDownloader:
                     else:
                         self.logger.warning("Failed to download SRT subtitle")
 
-                # Inject description into video Summary metadata
-                with self._step(f"description injection for {video_id}"):
-                    self._inject_description_to_metadata(video_id)
+                # Summarize with Gemini + push to glance (falls back to the
+                # legacy description inject when disabled/failed)
+                with self._step(f"summarize + push for {video_id}"):
+                    self._summarize_and_push(video_id)
 
                 # Sync subtitles to Google Drive if enabled
                 if self.subtitle_syncer:
@@ -706,10 +739,12 @@ class PlaylistDownloader:
                                     srt_success_count += 1
                         self.logger.info(f"Downloaded {srt_success_count}/{len(downloaded_video_ids)} SRT subtitle(s)")
 
-                    # Inject description into Summary metadata for each video
-                    with self._step(f"description injection for {len(downloaded_video_ids)} video(s)"):
+                    # Summarize + push (or legacy description inject) per video
+                    with self._step(
+                        f"summarize + push for {len(downloaded_video_ids)} video(s)"
+                    ):
                         for video_id in downloaded_video_ids:
-                            self._inject_description_to_metadata(video_id)
+                            self._summarize_and_push(video_id)
 
                     # Sync subtitles to Google Drive if enabled
                     if self.subtitle_syncer:
