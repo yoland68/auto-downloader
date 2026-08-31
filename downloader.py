@@ -11,6 +11,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -51,18 +54,41 @@ class PlaylistDownloader:
     def _setup_logging(self):
         """Configure logging system."""
         log_file = self.config.get('log_file', 'downloader.log')
+        log_level = getattr(
+            logging, str(self.config.get('log_level', 'INFO')).upper(), logging.INFO
+        )
+        max_bytes = int(self.config.get('log_max_bytes', 10 * 1024 * 1024))
+        backup_count = int(self.config.get('log_backup_count', 3))
 
-        # Create logger
+        # Handlers go on the root logger so that sibling loggers -- notably
+        # DownloadScheduler and PlaylistManager -- are captured too. Previously
+        # only this class's logger had handlers, so scheduler and playlist
+        # errors never reached the log file at all.
+        root_logger = logging.getLogger()
+        root_logger.setLevel(log_level)
+
+        # Handlers are process-global, so re-initializing would otherwise stack
+        # duplicates and log every line more than once.
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            handler.close()
+
         self.logger = logging.getLogger('PlaylistDownloader')
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(log_level)
+        self.logger.propagate = True
+        for handler in list(self.logger.handlers):
+            self.logger.removeHandler(handler)
+            handler.close()
 
-        # File handler
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.INFO)
+        # File handler (rotating, so the log cannot grow without bound)
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+        )
+        file_handler.setLevel(log_level)
 
         # Console handler
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(log_level)
 
         # Formatter
         formatter = logging.Formatter(
@@ -73,8 +99,8 @@ class PlaylistDownloader:
         console_handler.setFormatter(formatter)
 
         # Add handlers
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(console_handler)
+        root_logger.addHandler(file_handler)
+        root_logger.addHandler(console_handler)
 
     def _setup_directories(self):
         """Create necessary directories if they don't exist."""
@@ -112,12 +138,55 @@ class PlaylistDownloader:
                 queue_file=self.config.get('download_queue_file', '.download_queue.txt'),
                 cookies_browser=options.get('cookies_from_browser'),
                 cookies_path=options.get('cookies_path') or options.get('cookies_from_browser_path'),
-                extractor_args=options.get('extractor_args')
+                extractor_args=options.get('extractor_args'),
+                fetch_timeout_seconds=int(
+                    self.config.get('playlist_fetch_timeout_seconds', 300)
+                )
             )
             self.logger.info("Playlist manager initialized")
         except Exception as e:
             self.logger.error(f"Failed to setup playlist manager: {e}")
             self.playlist_manager = None
+
+    @contextmanager
+    def _step(self, label: str):
+        """
+        Log the start and end of a pipeline step along with its elapsed time.
+
+        Gives the log a readable timeline and guarantees that a step which
+        raises reports both how long it ran and its traceback.
+        """
+        start = time.monotonic()
+        self.logger.info(f"[step:start] {label}")
+        try:
+            yield
+        except Exception as e:
+            self.logger.error(
+                f"[step:error] {label} failed after {time.monotonic() - start:.1f}s: {e}",
+                exc_info=True,
+            )
+            raise
+        else:
+            self.logger.info(f"[step:done] {label} in {time.monotonic() - start:.1f}s")
+
+    def _log_output(self, label, stdout, stderr, level=logging.DEBUG, max_chars=2000):
+        """
+        Log captured subprocess output, keeping the most recent max_chars.
+
+        Args:
+            label: Prefix identifying the command the output came from
+            stdout: Captured stdout (may be None or empty)
+            stderr: Captured stderr (may be None or empty)
+            level: Level to log at -- DEBUG for routine output, higher on failure
+            max_chars: Keep only this many trailing characters per stream
+        """
+        for name, text in (('stdout', stdout), ('stderr', stderr)):
+            text = (text or '').strip()
+            if not text:
+                continue
+            if len(text) > max_chars:
+                text = f"...(truncated, showing last {max_chars} chars)...\n{text[-max_chars:]}"
+            self.logger.log(level, f"{label} {name}:\n{text}")
 
     def _inject_description_to_metadata(self, video_id: str) -> bool:
         """
@@ -131,7 +200,9 @@ class PlaylistDownloader:
             return False
 
         download_path = Path(self.config.get('download_path', './downloads'))
-        matches = list(download_path.rglob(f'*[{video_id}].mp4'))
+        # Note: video_id is wrapped in brackets in the filename, which glob would
+        # treat as a character class -- match on substring instead.
+        matches = [f for f in download_path.rglob('*.mp4') if f'[{video_id}]' in f.name]
         if not matches:
             self.logger.warning(f"inject_description: no mp4 found for {video_id}")
             return False
@@ -154,12 +225,17 @@ class PlaylistDownloader:
             return False
 
         # Write to a temp file in the same directory, then atomically replace.
+        started = time.monotonic()
         try:
             tmp_fd, tmp_path = tempfile.mkstemp(
                 suffix='.mp4', dir=video_path.parent, prefix='.tmp_'
             )
             os.close(tmp_fd)
 
+            self.logger.info(
+                f"inject_description: running ffmpeg on {video_path.name} "
+                f"({len(description)} chars of description)"
+            )
             result = subprocess.run(
                 [
                     'ffmpeg', '-y',
@@ -174,23 +250,42 @@ class PlaylistDownloader:
                 timeout=120,
             )
 
+            elapsed = time.monotonic() - started
+
             if result.returncode != 0:
                 self.logger.error(
-                    f"inject_description: ffmpeg failed for {video_id}: {result.stderr[-500:]}"
+                    f"inject_description: ffmpeg failed for {video_id} "
+                    f"after {elapsed:.1f}s (exit code {result.returncode})"
+                )
+                self._log_output(
+                    f"inject_description[{video_id}] ffmpeg",
+                    result.stdout, result.stderr, level=logging.ERROR,
                 )
                 Path(tmp_path).unlink(missing_ok=True)
                 return False
 
+            self._log_output(
+                f"inject_description[{video_id}] ffmpeg", result.stdout, result.stderr
+            )
             os.replace(tmp_path, video_path)
-            self.logger.info(f"inject_description: embedded description into {video_path.name}")
+            self.logger.info(
+                f"inject_description: embedded description into {video_path.name} in {elapsed:.1f}s"
+            )
             return True
 
         except subprocess.TimeoutExpired:
-            self.logger.error(f"inject_description: ffmpeg timed out for {video_id}")
+            self.logger.error(
+                f"inject_description: ffmpeg timed out for {video_id} "
+                f"after {time.monotonic() - started:.1f}s"
+            )
             Path(tmp_path).unlink(missing_ok=True)
             return False
         except Exception as e:
-            self.logger.error(f"inject_description: unexpected error for {video_id}: {e}")
+            self.logger.error(
+                f"inject_description: unexpected error for {video_id} "
+                f"after {time.monotonic() - started:.1f}s: {e}",
+                exc_info=True,
+            )
             Path(tmp_path).unlink(missing_ok=True)
             return False
 
@@ -336,26 +431,42 @@ class PlaylistDownloader:
             # Add video URL
             cmd.append(video_url)
 
+            self.logger.debug(f"SRT command: {' '.join(cmd)}")
+
             # Execute yt-dlp for SRT download
+            started = time.monotonic()
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=60
             )
+            elapsed = time.monotonic() - started
 
             if result.returncode == 0:
-                self.logger.info(f"Successfully downloaded SRT subtitle for {video_id}")
+                self.logger.info(
+                    f"Successfully downloaded SRT subtitle for {video_id} in {elapsed:.1f}s"
+                )
+                self._log_output(f"srt[{video_id}] yt-dlp", result.stdout, result.stderr)
                 return True
             else:
-                self.logger.warning(f"Failed to download SRT for {video_id}: {result.stderr}")
+                self.logger.warning(
+                    f"Failed to download SRT for {video_id} after {elapsed:.1f}s "
+                    f"(exit code {result.returncode})"
+                )
+                self._log_output(
+                    f"srt[{video_id}] yt-dlp",
+                    result.stdout, result.stderr, level=logging.WARNING,
+                )
                 return False
 
         except subprocess.TimeoutExpired:
-            self.logger.error(f"SRT download timeout for {video_id}")
+            self.logger.error(
+                f"SRT download timeout for {video_id} after {time.monotonic() - started:.1f}s"
+            )
             return False
         except Exception as e:
-            self.logger.error(f"Error downloading SRT for {video_id}: {e}")
+            self.logger.error(f"Error downloading SRT for {video_id}: {e}", exc_info=True)
             return False
 
     def download_single_video(self, video_id: str) -> bool:
@@ -370,9 +481,11 @@ class PlaylistDownloader:
         """
         try:
             video_url = f"https://www.youtube.com/watch?v={video_id}"
+            started = time.monotonic()
             self.logger.info("=" * 60)
             self.logger.info(f"Downloading single video: {video_id}")
             self.logger.info(f"URL: {video_url}")
+            self.logger.info(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
 
             download_path = self.config.get('download_path', './downloads')
             archive_file = self.config.get('archive_file', '.download_archive.txt')
@@ -468,39 +581,55 @@ class PlaylistDownloader:
                         self.logger.warning(line)
 
             return_code = process.wait()
+            fetch_elapsed = time.monotonic() - started
+            self.logger.info(
+                f"[step:done] yt-dlp fetch for {video_id} in {fetch_elapsed:.1f}s "
+                f"(exit code {return_code})"
+            )
 
             if return_code == 0 and download_success:
                 self.logger.info(f"Successfully downloaded video: {video_id}")
 
                 # Download SRT subtitle
-                self.logger.info("Downloading SRT subtitle...")
-                if self._download_srt_for_video(video_id):
-                    self.logger.info("SRT subtitle downloaded successfully")
-                else:
-                    self.logger.warning("Failed to download SRT subtitle")
+                with self._step(f"SRT subtitle for {video_id}"):
+                    if self._download_srt_for_video(video_id):
+                        self.logger.info("SRT subtitle downloaded successfully")
+                    else:
+                        self.logger.warning("Failed to download SRT subtitle")
 
                 # Inject description into video Summary metadata
-                self._inject_description_to_metadata(video_id)
+                with self._step(f"description injection for {video_id}"):
+                    self._inject_description_to_metadata(video_id)
 
                 # Sync subtitles to Google Drive if enabled
                 if self.subtitle_syncer:
                     try:
-                        self.logger.info("Syncing subtitles to Google Drive...")
-                        synced, skipped = self.subtitle_syncer.sync_subtitles()
-                        if synced > 0:
-                            self.logger.info(f"Synced {synced} subtitle(s) to Google Drive")
+                        with self._step("Google Drive subtitle sync"):
+                            synced, skipped = self.subtitle_syncer.sync_subtitles()
+                        self.logger.info(
+                            f"Synced {synced} subtitle(s), skipped {skipped}"
+                        )
                     except Exception as e:
-                        self.logger.error(f"Failed to sync subtitles: {e}")
+                        self.logger.error(f"Failed to sync subtitles: {e}", exc_info=True)
 
+                self.logger.info(
+                    f"Finished {video_id} in {time.monotonic() - started:.1f}s total"
+                )
                 self.logger.info("=" * 60)
                 return True
             else:
-                self.logger.error(f"Failed to download video {video_id} (exit code: {return_code})")
+                self.logger.error(
+                    f"Failed to download video {video_id} after {fetch_elapsed:.1f}s "
+                    f"(exit code: {return_code})"
+                )
                 self.logger.info("=" * 60)
                 return False
 
         except Exception as e:
-            self.logger.error(f"Error downloading video {video_id}: {e}", exc_info=True)
+            self.logger.error(
+                f"Error downloading video {video_id} after {time.monotonic() - started:.1f}s: {e}",
+                exc_info=True,
+            )
             self.logger.info("=" * 60)
             return False
 
@@ -511,10 +640,12 @@ class PlaylistDownloader:
         Returns:
             True if successful, False otherwise
         """
+        started = time.monotonic()
         try:
             self.logger.info("=" * 60)
             self.logger.info("Starting playlist check and download")
             self.logger.info(f"Playlist: {self.config.get('playlist_url')}")
+            self.logger.info(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
 
             cmd = self._build_yt_dlp_command()
             self.logger.info(f"Command: {' '.join(cmd)}")
@@ -556,6 +687,11 @@ class PlaylistDownloader:
 
             # Wait for completion
             return_code = process.wait()
+            fetch_elapsed = time.monotonic() - started
+            self.logger.info(
+                f"[step:done] yt-dlp playlist run in {fetch_elapsed:.1f}s "
+                f"(exit code {return_code}, {new_downloads} new video(s))"
+            )
 
             if return_code == 0:
                 if new_downloads > 0:
@@ -563,31 +699,36 @@ class PlaylistDownloader:
 
                     # Download SRT subtitles for each newly downloaded video
                     if downloaded_video_ids:
-                        self.logger.info(f"Downloading SRT subtitles for {len(downloaded_video_ids)} video(s)...")
-                        srt_success_count = 0
-                        for video_id in downloaded_video_ids:
-                            if self._download_srt_for_video(video_id):
-                                srt_success_count += 1
+                        with self._step(f"SRT subtitles for {len(downloaded_video_ids)} video(s)"):
+                            srt_success_count = 0
+                            for video_id in downloaded_video_ids:
+                                if self._download_srt_for_video(video_id):
+                                    srt_success_count += 1
                         self.logger.info(f"Downloaded {srt_success_count}/{len(downloaded_video_ids)} SRT subtitle(s)")
 
                     # Inject description into Summary metadata for each video
-                    for video_id in downloaded_video_ids:
-                        self._inject_description_to_metadata(video_id)
+                    with self._step(f"description injection for {len(downloaded_video_ids)} video(s)"):
+                        for video_id in downloaded_video_ids:
+                            self._inject_description_to_metadata(video_id)
 
                     # Sync subtitles to Google Drive if enabled
                     if self.subtitle_syncer:
                         try:
-                            self.logger.info("Syncing subtitles to Google Drive...")
-                            synced, skipped = self.subtitle_syncer.sync_subtitles()
-                            if synced > 0:
-                                self.logger.info(f"Synced {synced} subtitle(s) to Google Drive")
+                            with self._step("Google Drive subtitle sync"):
+                                synced, skipped = self.subtitle_syncer.sync_subtitles()
+                            self.logger.info(f"Synced {synced} subtitle(s), skipped {skipped}")
                         except Exception as e:
-                            self.logger.error(f"Failed to sync subtitles: {e}")
+                            self.logger.error(f"Failed to sync subtitles: {e}", exc_info=True)
                 else:
                     self.logger.info("No new videos found in playlist")
+                self.logger.info(
+                    f"Playlist check finished in {time.monotonic() - started:.1f}s total"
+                )
                 return True
             else:
-                self.logger.error(f"yt-dlp exited with code {return_code}")
+                self.logger.error(
+                    f"yt-dlp exited with code {return_code} after {fetch_elapsed:.1f}s"
+                )
                 return False
 
         except ValueError as e:
@@ -598,7 +739,10 @@ class PlaylistDownloader:
             self.logger.error("Install with: pip install yt-dlp")
             return False
         except Exception as e:
-            self.logger.error(f"Unexpected error during download: {e}", exc_info=True)
+            self.logger.error(
+                f"Unexpected error during download after {time.monotonic() - started:.1f}s: {e}",
+                exc_info=True,
+            )
             return False
 
     def get_playlist_info(self) -> Optional[Dict[str, Any]]:
@@ -631,22 +775,40 @@ class PlaylistDownloader:
 
             cmd.append(playlist_url)
 
+            self.logger.debug(f"Playlist info command: {' '.join(cmd)}")
+
+            started = time.monotonic()
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=30
             )
+            elapsed = time.monotonic() - started
 
             if result.returncode == 0:
                 # Parse the first line (playlist info)
                 lines = result.stdout.strip().split('\n')
-                if lines:
+                if lines and lines[0]:
+                    self.logger.info(f"Fetched playlist info in {elapsed:.1f}s")
+                    self._log_output('playlist_info yt-dlp', None, result.stderr)
                     return json.loads(lines[0])
+                self.logger.warning(
+                    f"Playlist info returned no data after {elapsed:.1f}s"
+                )
+            else:
+                self.logger.error(
+                    f"Playlist info failed after {elapsed:.1f}s "
+                    f"(exit code {result.returncode})"
+                )
+                self._log_output(
+                    'playlist_info yt-dlp',
+                    result.stdout, result.stderr, level=logging.ERROR,
+                )
             return None
 
         except Exception as e:
-            self.logger.error(f"Failed to get playlist info: {e}")
+            self.logger.error(f"Failed to get playlist info: {e}", exc_info=True)
             return None
 
 
