@@ -15,6 +15,7 @@ from threading import Lock
 import schedule
 
 from downloader import PlaylistDownloader
+from glance_only import GlanceOnlyIngester
 
 
 class DownloadScheduler:
@@ -40,6 +41,14 @@ class DownloadScheduler:
         self.last_refresh_time = 0  # When the playlist cache was last refreshed
         self.consecutive_refresh_failures = 0  # Drives exponential backoff
         self.next_refresh_allowed = 0  # Epoch seconds; set while backing off
+
+        # T-314: the glance-only lane shares the downloader's summarizer and
+        # pusher (one Gemini client, one retry file) but runs as its own job,
+        # outside the download rate limit — see glance_only.py's docstring.
+        self.glance_only = GlanceOnlyIngester(
+            self.downloader.config, self.downloader.summarizer,
+            self.downloader.glance_pusher, logger=self.logger)
+        self.glance_only_passes = 0
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -249,6 +258,16 @@ class DownloadScheduler:
             self.is_downloading = False
             self.download_lock.release()
 
+    def glance_only_job(self):
+        """Scheduled pass of the glance-only lane. `schedule` runs jobs on the
+        main thread one at a time, so this never overlaps a download; a long
+        download merely delays it to the next tick. Never raises."""
+        self.glance_only_passes += 1
+        try:
+            self.glance_only.run_once()
+        except Exception as e:
+            self.logger.error(f"Error in glance-only job: {e}", exc_info=True)
+
     def run(self):
         """Start the scheduler and run continuously."""
         self.logger.info("=" * 70)
@@ -287,9 +306,18 @@ class DownloadScheduler:
         # Schedule the download job
         schedule.every(check_interval).seconds.do(self.download_job)
 
+        # T-314: the glance-only lane, on its own interval
+        if self.glance_only.enabled:
+            glance_interval = int(self.glance_only.config.get('check_interval_seconds', 900))
+            self.logger.info(f"Glance-only lane: every {glance_interval}s, up to "
+                             f"{self.glance_only.config.get('max_per_tick')} video(s) per pass")
+            schedule.every(glance_interval).seconds.do(self.glance_only_job)
+
         # Run the first check immediately
         self.logger.info("Running initial check...")
         self.download_job()
+        if self.glance_only.enabled:
+            self.glance_only_job()
 
         # Main scheduler loop
         while self.running:

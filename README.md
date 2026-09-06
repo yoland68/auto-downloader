@@ -162,6 +162,55 @@ The scheduler will:
 python scheduler.py --config my_custom_config.json
 ```
 
+## Glance-only playlists (summarize, never download)
+
+Some playlists you want summarized into the glance deck without keeping the
+video: no mp4, no Plex entry, nothing on disk but the summary. Configure them
+under `glance_only` and the scheduler runs a second job beside the download
+lane:
+
+```json
+"glance_only": {
+  "enabled": true,
+  "playlists": [
+    {"url": "https://www.youtube.com/playlist?list=PLCBrsPqTz60U", "label": "SL"}
+  ],
+  "state_dir": "./glance_only",
+  "check_interval_seconds": 900,
+  "max_per_tick": 3,
+  "sleep_between_s": 15
+}
+```
+
+Each pass lists every configured playlist (`yt-dlp --flat-playlist`), and for
+up to `max_per_tick` videos without a summary yet: reads the metadata
+(`--skip-download --dump-single-json`), summarizes with the same Gemini
+summarizer as the download lane (URL mode; auto-captions as the fallback),
+writes `glance_only/<id>.summary.md` — the sidecar is the completion marker,
+exactly as in the download lane — and upserts the row to glance's
+`youtube_videos` with `ingest_mode = 'glance_only'` and no `download_path`.
+The glance deck shows the card like any other video and withholds "Open in
+Plex" for it.
+
+The lane needs the same credentials as the summarizer (`GEMINI_API_KEY`,
+`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` in `.env`) and disables itself,
+saying why, when either the summarizer or the glance push is off. It is not
+behind the download rate limit: nothing here is a download.
+
+Manual runs:
+
+```bash
+python3 summarize_backfill.py --glance-only --dry-run   # what would be summarized
+python3 summarize_backfill.py --glance-only --limit 5   # one bounded pass
+python3 summarize_backfill.py --retry-failed            # re-push parked ids, either lane
+python3 -m pytest tests                                 # offline suite
+```
+
+Deploy order matters once: glance's migration `20260905000040_youtube_ingest_mode`
+must be applied before this version runs, or every upsert (both lanes now write
+`ingest_mode`) is a 400 and the ids park in `.glance_push_failed.txt` until
+`--retry-failed`.
+
 ## Running as a Background Service
 
 ### Using nohup (Linux/macOS)
@@ -266,6 +315,10 @@ aududownloader/
 ├── config_subs_only.json          # Subtitle-only config
 ├── downloader.py                  # Core download logic
 ├── scheduler.py                   # Scheduling and monitoring
+├── glance_only.py                 # Summarize-only playlists for glance (no download)
+├── summarizer.py                  # Gemini summaries (shared by both lanes)
+├── glance_push.py                 # Upsert rows to glance's youtube_videos
+├── tests/                         # Offline pytest suite
 ├── subtitle_syncer.py             # Google Drive sync module
 ├── requirements.txt               # Python dependencies
 ├── README.md                      # This file
