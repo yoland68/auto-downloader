@@ -29,6 +29,9 @@ class DownloadScheduler:
             config_path: Path to the configuration file
         """
         self.config_path = config_path
+        # Assigned before anything below can use it: the glance-only lane is
+        # constructed in this method and takes the logger as an argument.
+        self.logger = logging.getLogger('DownloadScheduler')
         self.downloader = PlaylistDownloader(config_path)
         self.running = True
         self.check_count = 0
@@ -53,8 +56,6 @@ class DownloadScheduler:
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-
-        self.logger = logging.getLogger('DownloadScheduler')
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
