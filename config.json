@@ -33,7 +33,7 @@
     "enabled": true,
     "gemini_model": "gemini-2.5-flash",
     "input_mode": "auto",
-    "url_max_duration_s": 7200,
+    "url_max_duration_s": 3000,
     "max_output_tokens": 4096,
     "request_timeout_s": 300,
     "max_retries": 3,
@@ -45,7 +45,10 @@
   "glance_only": {
     "enabled": true,
     "playlists": [
-      {"url": "https://www.youtube.com/playlist?list=PLCBrsPqTz60U", "label": "SL"}
+      {
+        "url": "https://www.youtube.com/playlist?list=PLCBrsPqTz60U",
+        "label": "SL"
+      }
     ],
     "state_dir": "./glance_only",
     "check_interval_seconds": 900,

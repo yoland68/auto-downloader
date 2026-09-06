@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Dict
 
-from summarizer import VideoSummarizer, VIDEO_ID_RE
+from summarizer import VideoSummarizer, VIDEO_ID_RE, make_record
 from glance_push import GlancePusher
 from glance_only import GlanceOnlyIngester
 
@@ -80,6 +80,12 @@ def main() -> int:
                              'video that already has a .summary.md')
     parser.add_argument('--retry-failed', action='store_true',
                         help='Only re-push ids from the failed-push list')
+    parser.add_argument('--push-failures', action='store_true',
+                        help='When summarization fails, upsert a placeholder '
+                             'row ("Summarization Failed") so the video still '
+                             'gets a deck card. No sidecar is written, so the '
+                             'video stays retryable; a later real summary '
+                             'overwrites the placeholder.')
     parser.add_argument('--sleep', type=float, default=15,
                         help='Seconds between Gemini calls (default 15)')
     parser.add_argument('--glance-only', action='store_true',
@@ -190,6 +196,20 @@ def main() -> int:
                                             mode=args.mode)
         if record is None:
             failed += 1
+            if args.push_failures and pusher.enabled:
+                info = summarizer._load_info(path)
+                placeholder = make_record(
+                    video_id, info,
+                    "**Summarization Failed**\n\nNo summary is available: "
+                    "summarization failed for this video. It will be retried "
+                    "by a future backfill.",
+                    {'input': 'failed'},
+                    summarizer.config['gemini_model'],
+                    playlist_id=None,
+                    download_path=str(path.relative_to(download_path)),
+                    ingest_mode='download')
+                if pusher.push_video(placeholder):
+                    logger.info(f"push_failures: placeholder row for {video_id}")
             continue
         summarized += 1
         if pusher.enabled and pusher.push_video(record):
