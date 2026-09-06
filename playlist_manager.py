@@ -9,7 +9,30 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Set, Optional
+from typing import Any, Dict, List, Optional, Set
+
+
+def yt_dlp_auth_args(options: Dict[str, Any]) -> List[str]:
+    """The cookie/extractor arguments every yt-dlp call here carries, read from
+    config's `yt_dlp_options` — one home for the rule the download lane spells
+    out inline in downloader.py (T-314 added a third caller and stopped there).
+
+    Default is Chrome's macOS profile, exactly as the download lane defaults.
+    """
+    args: List[str] = []
+    cookies_browser = options.get('cookies_from_browser')
+    cookies_path = options.get('cookies_path') or options.get('cookies_from_browser_path')
+    if cookies_browser:
+        if cookies_path:
+            args.extend(['--cookies-from-browser', f'{cookies_browser}:{cookies_path}'])
+        else:
+            args.extend(['--cookies-from-browser', cookies_browser])
+    else:
+        default_chrome_path = str(Path.home() / 'Library' / 'Application Support' / 'Google' / 'Chrome')
+        args.extend(['--cookies-from-browser', f'chrome:{default_chrome_path}'])
+    if options.get('extractor_args'):
+        args.extend(['--extractor-args', options['extractor_args']])
+    return args
 
 
 class PlaylistManager:

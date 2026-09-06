@@ -11,6 +11,8 @@ ENV/
 
 # Downloaded content
 downloads/
+# Glance-only lane state (sidecars + captions; the summary IS the state)
+glance_only/
 *.mp4
 *.webm
 *.mkv

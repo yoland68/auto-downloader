@@ -8,6 +8,12 @@ embed it into the mp4's synopsis metadata (the field Plex/Infuse show as
 "Summary"). The original YouTube description is preserved in the
 `description` tag.
 
+The Gemini call itself never needed the file: URL mode hands Gemini the
+YouTube URL, transcript mode hands it caption text. `summarize_info()` is that
+file-free core, shared with the glance-only lane (glance_only.py), which
+summarizes playlists that are never downloaded. `make_record()` is the shared
+row shape for glance's youtube_videos table; the lane is its `ingest_mode`.
+
 Input modes:
   * "url"        — hand Gemini the YouTube URL directly (it ingests the video)
   * "transcript" — feed the already-downloaded .srt/.vtt captions as text
@@ -28,7 +34,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 VIDEO_ID_RE = re.compile(r'\[([A-Za-z0-9_-]{11})\]')
 
@@ -60,6 +66,50 @@ def find_video_file(download_path: Path, video_id: str) -> Optional[Path]:
         if f'[{video_id}]' in p.name:
             return p
     return None
+
+
+def make_record(video_id: str, info: Dict[str, Any], summary_md: str,
+                header: Dict[str, str], default_model: str, *,
+                playlist_id: Optional[str], download_path: Optional[str],
+                ingest_mode: str) -> Dict[str, Any]:
+    """The youtube_videos row, for either lane.
+
+    ingest_mode is 'download' (file on the Plex machine, download_path set)
+    or 'glance_only' (summarized from the URL, download_path None). The
+    column is NOT NULL with a two-value CHECK on glance's side (migration
+    040), so a third value is rejected by the database, not laundered here.
+    """
+    upload_date = None
+    raw_date = info.get('upload_date')  # yt-dlp YYYYMMDD
+    if raw_date and re.fullmatch(r'\d{8}', str(raw_date)):
+        upload_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+    return {
+        "video_id": info.get('id') or video_id,
+        "playlist_id": playlist_id,
+        "title": info.get('title') or video_id,
+        "channel": info.get('channel') or info.get('uploader'),
+        "url": info.get('webpage_url')
+               or f"https://www.youtube.com/watch?v={video_id}",
+        "upload_date": upload_date,
+        "duration_s": info.get('duration'),
+        "description": info.get('description'),
+        "summary_md": summary_md,
+        "summarized_at": header.get('generated')
+                         or datetime.now(timezone.utc).isoformat(),
+        "summary_model": header.get('model') or default_model,
+        "download_path": download_path,
+        "thumbnail": info.get('thumbnail'),
+        "ingest_mode": ingest_mode,
+        "metadata": {
+            "input_mode": header.get('input'),
+            "chapters": [
+                {"title": c.get('title'), "start_time": c.get('start_time')}
+                for c in (info.get('chapters') or [])
+            ],
+            "tags": (info.get('tags') or [])[:20],
+            "view_count": info.get('view_count'),
+        },
+    }
 
 
 class VideoSummarizer:
@@ -115,47 +165,22 @@ class VideoSummarizer:
             return None
         info = self._load_info(video_path)
         summary_path = self._summary_path(video_path)
-        summary_md, header = self._read_summary_md(summary_path)
+        summary_md, header = self.read_summary_md(summary_path)
         if summary_md is None:
             self.logger.warning(f"build_record: no summary sidecar for {video_id}")
             return None
-
-        upload_date = None
-        raw_date = info.get('upload_date')  # yt-dlp YYYYMMDD
-        if raw_date and re.fullmatch(r'\d{8}', str(raw_date)):
-            upload_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
 
         try:
             rel_path = str(video_path.relative_to(self.download_path))
         except ValueError:
             rel_path = str(video_path)
 
-        return {
-            "video_id": info.get('id') or video_id,
-            "playlist_id": info.get('playlist_id'),
-            "title": info.get('title') or video_path.stem,
-            "channel": info.get('channel') or info.get('uploader'),
-            "url": info.get('webpage_url')
-                   or f"https://www.youtube.com/watch?v={video_id}",
-            "upload_date": upload_date,
-            "duration_s": info.get('duration'),
-            "description": info.get('description'),
-            "summary_md": summary_md,
-            "summarized_at": header.get('generated')
-                             or datetime.now(timezone.utc).isoformat(),
-            "summary_model": header.get('model') or self.config['gemini_model'],
-            "download_path": rel_path,
-            "thumbnail": info.get('thumbnail'),
-            "metadata": {
-                "input_mode": header.get('input'),
-                "chapters": [
-                    {"title": c.get('title'), "start_time": c.get('start_time')}
-                    for c in (info.get('chapters') or [])
-                ],
-                "tags": (info.get('tags') or [])[:20],
-                "view_count": info.get('view_count'),
-            },
-        }
+        if not info.get('title'):
+            info = {**info, 'title': video_path.stem}
+        return make_record(
+            video_id, info, summary_md, header, self.config['gemini_model'],
+            playlist_id=info.get('playlist_id'), download_path=rel_path,
+            ingest_mode='download')
 
     def bakeoff(self, video_id: str) -> Dict[str, bool]:
         """Run BOTH input modes, writing .summary.url.md / .summary.transcript.md.
@@ -173,7 +198,7 @@ class VideoSummarizer:
 
         summary = self._summarize_via_url(info)
         if summary:
-            self._write_summary_file(
+            self.write_summary_file(
                 Path(str(video_path)[:-len(video_path.suffix)] + '.summary.url.md'),
                 video_id, info, summary, 'url')
             results["url"] = True
@@ -182,7 +207,7 @@ class VideoSummarizer:
             text = self._transcript_to_text(transcript_path)
             summary = self._summarize_via_transcript(info, text)
             if summary:
-                self._write_summary_file(
+                self.write_summary_file(
                     Path(str(video_path)[:-len(video_path.suffix)]
                          + '.summary.transcript.md'),
                     video_id, info, summary, 'transcript')
@@ -213,35 +238,15 @@ class VideoSummarizer:
 
         info = self._load_info(video_path)
         transcript_path = self._find_transcript(video_id, video_path)
-        chosen = mode or self.config['input_mode']
-        if chosen == 'auto':
-            chosen = self._choose_mode(info, transcript_path)
-
-        summary = None
-        used_mode = chosen
-        if chosen == 'url':
-            summary = self._summarize_via_url(info)
-            if summary is None and transcript_path:
-                self.logger.info(f"summarize: URL mode failed for {video_id}, "
-                                 "falling back to transcript")
-                summary = self._summarize_via_transcript(
-                    info, self._transcript_to_text(transcript_path))
-                used_mode = 'transcript'
-        else:  # transcript
-            if transcript_path:
-                summary = self._summarize_via_transcript(
-                    info, self._transcript_to_text(transcript_path))
-            if summary is None:
-                self.logger.info(f"summarize: transcript mode unavailable/failed "
-                                 f"for {video_id}, trying URL mode")
-                summary = self._summarize_via_url(info)
-                used_mode = 'url'
-
-        if summary is None:
-            self.logger.error(f"summarize: both input modes failed for {video_id}")
+        transcript = ((lambda: self._transcript_to_text(transcript_path))
+                      if transcript_path else None)
+        result = self.summarize_info(info, mode=mode, transcript=transcript,
+                                     video_id=video_id)
+        if result is None:
             return None
+        summary, used_mode = result
 
-        self._write_summary_file(summary_path, video_id, info, summary, used_mode)
+        self.write_summary_file(summary_path, video_id, info, summary, used_mode)
         self.logger.info(f"summarize: wrote {summary_path.name} ({used_mode} mode)")
 
         if self.config.get('inject_summary_to_metadata', True):
@@ -250,13 +255,66 @@ class VideoSummarizer:
 
         return self.build_record(video_id)
 
-    def _choose_mode(self, info: Dict[str, Any],
-                     transcript_path: Optional[Path]) -> str:
+    def summarize_info(self, info: Dict[str, Any], mode: Optional[str] = None,
+                       transcript: Optional[Callable[[], Optional[str]]] = None,
+                       video_id: str = '?') -> Optional[Tuple[str, str]]:
+        """Summarize from metadata alone. Returns (summary_md, used_mode) or None.
+
+        The file-free core both lanes share. `transcript` is a zero-arg
+        callable returning caption text (or None), invoked at most once and
+        only when transcript mode is actually needed — the download lane pays
+        a file read for it, the glance-only lane a yt-dlp round trip, and
+        neither should pay when URL mode succeeds. Never raises.
+        """
+        if not self.enabled:
+            return None
+        cache: Dict[str, Optional[str]] = {}
+
+        def caption_text() -> Optional[str]:
+            if 'text' not in cache:
+                try:
+                    cache['text'] = transcript() if transcript else None
+                except Exception as e:
+                    self.logger.error(f"summarize: transcript fetch failed for "
+                                      f"{video_id}: {e}")
+                    cache['text'] = None
+            return cache['text'] or None
+
+        chosen = mode or self.config['input_mode']
+        if chosen == 'auto':
+            chosen = self._choose_mode(info, has_transcript=transcript is not None)
+
+        if chosen == 'url':
+            summary = self._summarize_via_url(info)
+            if summary:
+                return summary, 'url'
+            text = caption_text()
+            if text:
+                self.logger.info(f"summarize: URL mode failed for {video_id}, "
+                                 "falling back to transcript")
+                summary = self._summarize_via_transcript(info, text)
+                if summary:
+                    return summary, 'transcript'
+        else:  # transcript
+            text = caption_text()
+            summary = self._summarize_via_transcript(info, text) if text else None
+            if summary:
+                return summary, 'transcript'
+            self.logger.info(f"summarize: transcript mode unavailable/failed "
+                             f"for {video_id}, trying URL mode")
+            summary = self._summarize_via_url(info)
+            if summary:
+                return summary, 'url'
+
+        self.logger.error(f"summarize: both input modes failed for {video_id}")
+        return None
+
+    def _choose_mode(self, info: Dict[str, Any], has_transcript: bool) -> str:
         duration = info.get('duration') or 0
         url = info.get('webpage_url')
         if url and duration <= self.config['url_max_duration_s']:
             return 'url'
-        if transcript_path:
+        if has_transcript:
             return 'transcript'
         return 'url'  # last resort: try URL anyway, accept failure
 
@@ -435,7 +493,7 @@ class VideoSummarizer:
     # Outputs
     # ------------------------------------------------------------------
 
-    def _write_summary_file(self, path: Path, video_id: str,
+    def write_summary_file(self, path: Path, video_id: str,
                             info: Dict[str, Any], summary: str, mode: str):
         generated = datetime.now(timezone.utc).isoformat()
         model = self.config['gemini_model']
@@ -449,7 +507,7 @@ class VideoSummarizer:
         tmp_path.write_text(content, encoding='utf-8')
         os.replace(tmp_path, path)
 
-    def _read_summary_md(self, path: Path):
+    def read_summary_md(self, path: Path):
         """Return (summary body, header dict) or (None, {}) if absent."""
         if not path.exists():
             return None, {}
